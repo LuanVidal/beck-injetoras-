@@ -1,13 +1,14 @@
 const fs = require("fs");
 
 class ScreenManager {
-  constructor(io) {
+  constructor(io, data) {
     this.matricula = "";
     this.ordemproducao = "";
     this.id = "";
     this.consumivel = "";
     this.currentScreen = "home";
     this.mec = "8C:AA:B5:6A:78:F0";
+    this.data = data;
     this.io = io;
 
     this.initialize();
@@ -18,14 +19,30 @@ class ScreenManager {
           this.sendDataToServer("carregamento", "Carregando...");
         },
       },
+      retoma: {
+        action: () => {
+          this.sendDataToServer("retoma", "retoma");
+        },
+      },
       matricula: {
         action: () => {
           this.sendDataToServer("matricula", this.matricula);
         },
       },
-      injetora: {
+      ordemproducao: {
         action: () => {
-          this.sendDataToServer("injetora", "Injetora Screen");
+          this.sendDataToServer("ordemProducao", this.ordemproducao);
+          console.log("DENTRO DA ORDEM");
+        },
+      },
+      id: {
+        action: () => {
+          this.sendDataToServer("idNumber", this.id);
+        },
+      },
+      consumivel: {
+        action: () => {
+          this.sendDataToServer("consumivel", this.consumivel);
         },
       },
       validando: {
@@ -82,29 +99,29 @@ class ScreenManager {
           }
         },
       },
-      dashboard: {
+      rastreabilidade: {
         action: () => {
-          this.sendDataToServer("dashboard", "Dashboard Screen");
+          this.sendDataToServer("telaRastreabilidade", "telaRastreabilidade");
+        this.sendDataToServer("parameters", { Corrente: this.data.correnteAnterior, Tensao: this.data.tensaoAnterior });
+
+        // Verifica se há um intervalo existente e o limpa
+        if (this.intervalId) {
+          clearInterval(this.intervalId);
+        }
+
+        // Reinicia o temporizador após a pausa
+        this.intervalId = setInterval(() => {
+          // Envia os dados atualizados
+          this.io.emit("parameters", {
+            Corrente: this.data.correnteAnterior,
+            Tensao: this.data.tensaoAnterior,
+          });
+        }, 500);
         },
       },
-      main: {
+      finaliza: {
         action: () => {
-          this.sendDataToServer("main", "Main Screen");
-        },
-      },
-      refugo: {
-        action: () => {
-          this.sendDataToServer("refugo", "Refugo Screen");
-        },
-      },
-      "cards-parada": {
-        action: () => {
-          this.sendDataToServer("cards-parada", "Cards Parada Screen");
-        },
-      },
-      "cosulta-refugo": {
-        action: () => {
-          this.sendDataToServer("consulta-refugo", "Consulta Refugo Screen");
+          this.sendDataToServer("finalizaProcesso", "finalizaProcesso");
         },
       },
     };
