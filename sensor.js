@@ -1,9 +1,12 @@
-const SerialPort = require('serialport');
+const ADS1115 = require('ads1115');
+const i2c = require('i2c-bus');
 const amqp = require('amqplib');
 const ping = require('ping');
 
 const amqpServerUrl = 'amqp://W4nuCL2HK09PrG8H:7NXYX2gGYHGxCIBKoN3UtsLfRh@trends.injetoras.tcsapp.com.br:5672';
 const amqpQueue = 'measurements';
+const nomeUsuario = 'W4nuCL2HK09PrG8H';
+const senha = '7NXYX2gGYHGxCIBKoN3UtsLfRh';
 
 const FILTRO = 0.03;
 const LIMIAR_TENSAO = 28000;
@@ -19,43 +22,6 @@ let isAMQPConnected = false;
 let amqpChannelInfo = null;
 
 const buffer = [];
-
-const port = new SerialPort('/dev/ttyUSB0', { baudRate: 9600 });
-let partialData = '';
-
-port.on('data', (data) => {
-  // Acumular dados até formar uma mensagem completa
-  partialData += data.toString();
-
-  // Verificar se temos uma mensagem completa
-  const messages = partialData.split('T');
-
-  // Processar cada mensagem completa
-  messages.forEach((msg) => {
-    if (msg.length >= 8) {
-      // Extrair valores de tensão e corrente da mensagem
-      const match = msg.match(/(\d+\.\d+)C(\d+\.\d+)/);
-
-      if (match) {
-        const tensao = parseFloat(match[1]);
-        const corrente = parseFloat(match[2]);
-
-        console.log('Tensão:', tensao, 'Corrente:', corrente);
-
-        // Enviar os dados para o servidor AMQP
-        const timestamp = Date.now();
-        sendToAMQP(ID_TENSAO, tensao, timestamp);
-        sendToAMQP(ID_CORRENTE, corrente, timestamp);
-      } else {
-        // Ignorar mensagens desconhecidas
-        console.warn('Mensagem desconhecida recebida:', msg);
-      }
-    }
-  });
-
-  // Manter qualquer dado não processado para o próximo evento 'data'
-  partialData = messages[messages.length - 1];
-});
 
 const setupAMQPConnection = async (serverUrl) => {
   try {
@@ -91,6 +57,8 @@ const initAMQPConnection = async () => {
   isAMQPConnected = true; // Defina como verdadeiro após a conexão inicial
 };
 
+initAMQPConnection();
+
 const checkInternet = () => {
   return new Promise((resolve) => {
     const targetHost = 'www.google.com';
@@ -98,6 +66,11 @@ const checkInternet = () => {
       resolve(isAlive);
     });
   });
+};
+
+const data = {
+  tensaoAnterior: 0,
+  correnteAnterior: 0,
 };
 
 const sendToAMQP = async (idVariavel, valor, dataHora) => {
@@ -128,9 +101,9 @@ const sendToAMQP = async (idVariavel, valor, dataHora) => {
     };
 
     channel.sendToQueue(amqpQueue, Buffer.from(JSON.stringify(mensagem)));
-    console.log('Mensagem enviada para a fila AMQP:', mensagem);
+    //console.log('Mensagem enviada para a fila AMQP:', mensagem);
   } catch (error) {
-    console.error('Erro ao enviar mensagem para a fila AMQP:', error);
+    //console.error('Erro ao enviar mensagem para a fila AMQP:', error);
   }
 };
 
@@ -142,15 +115,61 @@ const processBuffer = async () => {
 };
 
 const startMeasurementLoop = async () => {
-  await initAMQPConnection();
+  const bus = await i2c.openPromisified(1);
+  const ads1115 = await ADS1115(bus);
 
   while (true) {
     try {
-      // Restante do código permanece inalterado
-      // Substitua pelo seu código de medição com ads1115
-      // ...
+      let tensao = await ads1115.measure('0+GND');
+      let corrente = await ads1115.measure('0+GND');
 
+      // Limiar para Tensão
+      if (tensao > LIMIAR_TENSAO) {
+        tensao = 0;
+      }
+
+      // Limiar para Corrente
+      if (corrente > LIMIAR_CORRENTE) {
+        corrente = 0;
+      }
+
+      const tensaoMapeada = tensao * 0.00384615;
+      const correnteMapeada = corrente * 0.0230131942313593;
+
+      data.tensaoAnterior = tensaoAnterior;
+      data.correnteAnterior = correnteAnterior;
+
+      if (tensaoMapeada <= 100) {
+        if (tensaoAnterior + 100 * FILTRO < tensaoMapeada || tensaoAnterior - 100 * FILTRO > tensaoMapeada) {
+          tensaoAnterior = parseFloat(tensaoMapeada.toFixed(2));
+        }
+      } else {
+        tensaoAnterior = 100;
+      }
+
+      if (tensaoMapeada <= 0) {
+        tensaoAnterior = 0;
+      }
+
+      if (correnteMapeada <= 600) {
+        if (correnteAnterior + 600 * FILTRO < correnteMapeada || correnteAnterior - 600 * FILTRO > correnteMapeada) {
+          correnteAnterior = parseFloat(correnteMapeada.toFixed(2));
+        }
+      } else {
+        correnteAnterior = 600;
+      }
+
+      if (correnteMapeada <= 0) {
+        correnteAnterior = 0;
+      }
+
+      const timestamp = Date.now();
+      sendToAMQP(ID_TENSAO, tensaoAnterior, timestamp);
+      sendToAMQP(ID_CORRENTE, correnteAnterior, timestamp);
+
+      //console.log(`Tensão: ${tensaoAnterior}, Corrente: ${correnteAnterior}`);
       await sleep(25); // Atraso de 25 milissegundos
+
     } catch (error) {
       console.error('Erro ao realizar medição:', error);
       // Se ocorrer um erro, coloque a mensagem no buffer
@@ -162,8 +181,4 @@ const startMeasurementLoop = async () => {
 
 // Função para criar um atraso
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-// Iniciar o loop de medição e envio para o servidor AMQP
-startMeasurementLoop();
-
-module.exports = { data };
+module.exports = { startMeasurementLoop, data };
