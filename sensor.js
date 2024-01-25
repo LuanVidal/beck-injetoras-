@@ -1,184 +1,99 @@
-const ADS1115 = require('ads1115');
-const i2c = require('i2c-bus');
-const amqp = require('amqplib');
-const ping = require('ping');
+const mqtt = require('mqtt');
+const { exec } = require('child_process');
 
-const amqpServerUrl = 'amqp://W4nuCL2HK09PrG8H:7NXYX2gGYHGxCIBKoN3UtsLfRh@trends.injetoras.tcsapp.com.br:5672';
-const amqpQueue = 'measurements';
-const nomeUsuario = 'W4nuCL2HK09PrG8H';
-const senha = '7NXYX2gGYHGxCIBKoN3UtsLfRh';
+const ssid = "EGR-FIBRA_2.4G-ROSEMEIRE";
+const password = "11151821";
+const ntpServer = "pool.ntp.org";
+const mqtt_user = "Vn1zj0dwxiX9CmBM";
+const mqtt_password = "ld39C62kLj0Jv9VIxsmdnm257i45pP6H";
+const BROKER_MQTT = "mqtt://144.202.45.101";
+const BROKER_PORT = 1883;
+const ID_MQTT = "1";
+const TOPIC_PUBLISH = "measurements";
+const OPTO_PIN = 39;
 
-const FILTRO = 0.03;
-const LIMIAR_TENSAO = 28000;
-const LIMIAR_CORRENTE = 28000;
+let epochTime;
+let estado_anterior = false;
 
-let tensaoAnterior = 0;
-let correnteAnterior = 0;
+const wifi = require('node-wifi');
+const mqttClient  = mqtt.connect(BROKER_MQTT, {
+  port: BROKER_PORT,
+  username: mqtt_user,
+  password: mqtt_password
+});
 
-const ID_TENSAO = 33;
-const ID_CORRENTE = 32;
+function getTime() {
+  return Math.floor(new Date().getTime() / 1000);
+}
 
-let isAMQPConnected = false;
-let amqpChannelInfo = null;
-
-const buffer = [];
-
-const setupAMQPConnection = async (serverUrl) => {
-  try {
-    const amqpConnection = await amqp.connect(serverUrl);
-    let channel = await amqpConnection.createChannel();
-
-    console.log('Conectado ao servidor AMQP');
-
-    amqpConnection.on('error', (err) => {
-      console.error('Erro na conexão AMQP:', err);
-      isAMQPConnected = false;
-      channel = null;
-      processBuffer();
-    });
-
-    return { amqpConnection, channel };
-  } catch (error) {
-    console.error('Erro ao configurar a conexão AMQP:', error);
-    isAMQPConnected = false;
-    return null;
-  }
-};
-
-const initAMQPConnection = async () => {
-  while (!amqpChannelInfo) {
-    amqpChannelInfo = await setupAMQPConnection(amqpServerUrl);
-    if (!amqpChannelInfo) {
-      console.log('Tentando reconectar ao servidor AMQP em 5 segundos...');
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-  }
-
-  isAMQPConnected = true; // Defina como verdadeiro após a conexão inicial
-};
-
-initAMQPConnection();
-
-const checkInternet = () => {
-  return new Promise((resolve) => {
-    const targetHost = 'www.google.com';
-    ping.sys.probe(targetHost, (isAlive) => {
-      resolve(isAlive);
-    });
+async function setup() {
+  await wifi.init({
+    iface: null // use the first available network interface
   });
-};
+  await conectaWiFi();
+  
+  mqttClient.on('connect', function () {
+    console.log('Conectado ao broker MQTT');
+  });
 
-const data = {
-  tensaoAnterior: 0,
-  correnteAnterior: 0,
-};
+  mqttClient.on('error', function (error) {
+    console.error('Erro de conexão MQTT:', error);
+  });
 
-const sendToAMQP = async (idVariavel, valor, dataHora) => {
-  try {
-    if (!amqpChannelInfo || !isAMQPConnected) {
-      console.error('A conexão AMQP não está disponível. Armazenando mensagem no buffer.');
-      buffer.push({ idVariavel, valor, dataHora });
-      return;
-    }
-
-    let { amqpConnection, channel } = amqpChannelInfo;
-
-    if (!channel) {
-      console.log('Reconectando ao servidor AMQP...');
-      amqpChannelInfo = await setupAMQPConnection(amqpServerUrl);
-      if (!amqpChannelInfo) {
-        console.error('Falha ao reconectar à conexão AMQP.');
+  setInterval(mantemConexoes, 60000); // Mantém as conexões a cada 1 minuto
+  setInterval(() => {
+    // Ler o estado do pino optoacoplador
+    exec(`gpio read ${OPTO_PIN}`, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Erro ao ler o pino optoacoplador: ${error.message}`);
         return;
       }
 
-      ({ channel } = amqpChannelInfo);
-    }
+      const estado_atual = parseInt(stdout.trim());
 
-    const mensagem = {
-      id_variavel: idVariavel,
-      valor: parseFloat(valor.toFixed(2)),
-      data_hora: parseFloat(dataHora.toFixed(3)),
-    };
+      // Verificar se o estado mudou
+      if (estado_atual !== estado_anterior) {
+        estado_anterior = estado_atual;
 
-    channel.sendToQueue(amqpQueue, Buffer.from(JSON.stringify(mensagem)));
-    //console.log('Mensagem enviada para a fila AMQP:', mensagem);
-  } catch (error) {
-    //console.error('Erro ao enviar mensagem para a fila AMQP:', error);
-  }
-};
-
-const processBuffer = async () => {
-  while (buffer.length > 0) {
-    const { idVariavel, valor, dataHora } = buffer.shift();
-    await sendToAMQP(idVariavel, valor, dataHora);
-  }
-};
-
-const startMeasurementLoop = async () => {
-  const bus = await i2c.openPromisified(1);
-  const ads1115 = await ADS1115(bus);
-
-  while (true) {
-    try {
-      let tensao = await ads1115.measure('0+GND');
-      let corrente = await ads1115.measure('0+GND');
-
-      // Limiar para Tensão
-      if (tensao > LIMIAR_TENSAO) {
-        tensao = 0;
-      }
-
-      // Limiar para Corrente
-      if (corrente > LIMIAR_CORRENTE) {
-        corrente = 0;
-      }
-
-      const tensaoMapeada = tensao * 0.00384615;
-      const correnteMapeada = corrente * 0.0230131942313593;
-
-      data.tensaoAnterior = tensaoAnterior;
-      data.correnteAnterior = correnteAnterior;
-
-      if (tensaoMapeada <= 100) {
-        if (tensaoAnterior + 100 * FILTRO < tensaoMapeada || tensaoAnterior - 100 * FILTRO > tensaoMapeada) {
-          tensaoAnterior = parseFloat(tensaoMapeada.toFixed(2));
+        if (estado_atual === 1) {
+          console.log("Injetora ligada");
+        } else {
+          console.log("Injetora desligada");
         }
-      } else {
-        tensaoAnterior = 100;
+
+        enviaValores(estado_atual);
       }
+    });
+  }, 500);
+}
 
-      if (tensaoMapeada <= 0) {
-        tensaoAnterior = 0;
-      }
+async function mantemConexoes() {
+  await conectaWiFi();
+}
 
-      if (correnteMapeada <= 600) {
-        if (correnteAnterior + 600 * FILTRO < correnteMapeada || correnteAnterior - 600 * FILTRO > correnteMapeada) {
-          correnteAnterior = parseFloat(correnteMapeada.toFixed(2));
-        }
-      } else {
-        correnteAnterior = 600;
-      }
+async function conectaWiFi() {
+  const currentConnections = await wifi.getCurrentConnections();
 
-      if (correnteMapeada <= 0) {
-        correnteAnterior = 0;
-      }
-
-      const timestamp = Date.now();
-      sendToAMQP(ID_TENSAO, tensaoAnterior, timestamp);
-      sendToAMQP(ID_CORRENTE, correnteAnterior, timestamp);
-
-      //console.log(`Tensão: ${tensaoAnterior}, Corrente: ${correnteAnterior}`);
-      await sleep(25); // Atraso de 25 milissegundos
-
-    } catch (error) {
-      console.error('Erro ao realizar medição:', error);
-      // Se ocorrer um erro, coloque a mensagem no buffer
-      buffer.push({ idVariavel: ID_TENSAO, valor: parseFloat(tensaoAnterior.toFixed(2)), dataHora: Date.now() });
-      buffer.push({ idVariavel: ID_CORRENTE, valor: parseFloat(correnteAnterior.toFixed(2)), dataHora: Date.now() });
-    }
+  if (currentConnections.length > 0 && currentConnections[0].ssid === ssid) {
+    return;
   }
-};
 
-// Função para criar um atraso
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-module.exports = { startMeasurementLoop, data };
+  console.log(`Conectando-se na rede: ${ssid}. Aguarde!`);
+  await wifi.connect({ ssid, password });
+  console.log("Conectado com sucesso à rede:", ssid);
+  console.log("IP obtido:", await wifi.getIP());
+}
+
+function conectaMQTT() {
+  console.log("Conectando ao broker MQTT...");
+  mqttClient.connect();
+}
+
+function enviaValores(estado_injetora) {
+  epochTime = getTime();
+
+  const mqttMessageTensao = `{"id_maquina": ${ID_MQTT}, "valor": ${estado_injetora}, "data_hora": ${epochTime}}`;
+  mqttClient.publish(TOPIC_PUBLISH, mqttMessageTensao);
+}
+
+setup();

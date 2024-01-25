@@ -4,6 +4,10 @@ const http = require("http").createServer(app);
 const io = require("socket.io")(http);
 const puppeteer = require("puppeteer-core");
 const ScreenManager = require("./screen-manager");
+const cors = require("cors"); // Importa o módulo CORS
+
+// Configuração do middleware CORS
+app.use(cors()); // Use o middleware cors
 
 app.use(express.static("dist"));
 
@@ -26,10 +30,10 @@ io.on("connection", (socket) => {
   startMeasurementLoop();
 
   // Change screen on connection
-  screenManager.changeScreenTo("matricula");
+  io.emit("changepath", "matricula")
 });
 
-const port = process.env.PORT || 8080;
+const port = process.env.PORT || 3000;
 http.listen(port, async () => {
   console.log(`Servidor Node.js rodando em http://localhost:${port}`);
 });
